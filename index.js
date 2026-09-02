@@ -41,7 +41,6 @@ const PREFIX = "$";
 const app = express();
 app.set("trust proxy", 1);
 const DASHBOARD_PORT = parseInt(process.env.PORT) || 3000;
-const DASHBOARD_PASSWORD = String(process.env.DASHBOARD_PASSWORD || "GFXADMINBYBAJI").trim();
 const AUTH_SECRET = String(process.env.SESSION_SECRET || process.env.AUTH_SECRET || "gfx_giveaway_secret_token_key").trim();
 
 function getDiscordClientId() {
@@ -166,10 +165,6 @@ function syncUserApproval(user) {
   return { status: "pending", role: "user" };
 }
 
-function generateToken() {
-  return crypto.createHash("sha256").update(DASHBOARD_PASSWORD + AUTH_SECRET).digest("hex");
-}
-
 function createSessionToken(user) {
   const payload = {
     id: user.id || "",
@@ -189,10 +184,6 @@ function createSessionToken(user) {
 
 function verifySessionToken(tokenStr) {
   if (!tokenStr) return null;
-  // Support legacy token if present
-  if (tokenStr === generateToken()) {
-    return { id: "admin", name: "Administrator", username: "admin", picture: "", provider: "legacy", status: "approved", role: "admin" };
-  }
   const parts = tokenStr.split(".");
   if (parts.length !== 2) return null;
   const [payloadB64, sig] = parts;
@@ -416,11 +407,6 @@ app.post("/api/auth/dev-login", (req, res) => {
   const token = createSessionToken(user);
   console.log(`[AUTH] Dev login initiated for: ${user.name} (${user.id})`);
   return res.json({ success: true, token, user });
-});
-
-// Legacy password route disabled
-app.post("/api/login", (req, res) => {
-  return res.status(400).json({ error: "Password login has been disabled. Please use Discord Login." });
 });
 
 app.get("/api/auth/verify", (req, res) => {
