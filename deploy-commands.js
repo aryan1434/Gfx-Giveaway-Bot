@@ -10,12 +10,12 @@ const commands = [
   },
   {
     name: "gc",
-    description: "Start a giveaway (Manage Messages required)",
+    description: "Start a giveaway (Admin/Manage Messages required)",
     options: [
       { name: "minutes", type: 4, description: "Duration in minutes", required: true },
       { name: "winners", type: 4, description: "Number of winners", required: true },
-      { name: "role", type: 8, description: "Required role to enter", required: true },
       { name: "prize", type: 3, description: "Giveaway prize", required: true },
+      { name: "role", type: 8, description: "Required role to enter (optional)", required: false },
     ],
   },
   {

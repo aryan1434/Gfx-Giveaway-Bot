@@ -10,14 +10,5 @@
       "approvedBy": "owner"
     }
   },
-  "pending": {
-    "1398666858961567824": {
-      "id": "1398666858961567824",
-      "name": "Thunder",
-      "username": "godthunder007",
-      "picture": "https://cdn.discordapp.com/avatars/1398666858961567824/62d9dcfb29ee1be9e3ffdd9aeaab3ee0.png?size=128",
-      "email": "bangladashs242@gmail.com",
-      "requestedAt": 1788358598426
-    }
-  }
+  "pending": {}
 }

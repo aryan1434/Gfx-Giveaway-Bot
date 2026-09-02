@@ -33,6 +33,7 @@ const client = new Client({
     GatewayIntentBits.GuildPresences,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+  rest: { timeout: 15000, retries: 2 },
 });
 
 const PREFIX = "$";
@@ -73,6 +74,18 @@ const ADMIN_DISCORD_IDS = String(
   .split(",")
   .map((id) => id.trim())
   .filter(Boolean);
+
+function isGiveawayManager(member, guild) {
+  if (!member) return false;
+  if (ADMIN_DISCORD_IDS.includes(member.id)) return true;
+  if (guild && guild.ownerId === member.id) return true;
+  if (member.permissions) {
+    if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
+    if (member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return true;
+    if (member.permissions.has(PermissionsBitField.Flags.ManageGuild)) return true;
+  }
+  return false;
+}
 
 const APPROVALS_FILE = path.join(__dirname, "approvals.json");
 
@@ -1015,34 +1028,49 @@ app.post("/api/giveaway", async (req, res) => {
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return res.status(404).json({ error: "Guild not found" });
 
-  if (!guild.members.me?.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-    return res.status(403).json({ error: "Bot is missing Manage Messages permission in that server." });
+  const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  const botCanManage = botMember && (
+    botMember.permissions.has(PermissionsBitField.Flags.Administrator) ||
+    botMember.permissions.has(PermissionsBitField.Flags.ManageMessages)
+  );
+  if (!botCanManage) {
+    return res.status(403).json({ error: "Bot is missing Manage Messages or Administrator permission in that server." });
   }
 
   try {
-    const msg = await startGiveaway({
-      guild,
-      channelId,
-      minutes,
-      winners,
-      prize,
-      host: host || "GFX GIVEAWAY",
-      requiredRoleIds: Array.isArray(requiredRoleIds) ? requiredRoleIds.filter(Boolean) : [],
-      blockedRoleIds: Array.isArray(blockedRoleIds) ? blockedRoleIds.filter(Boolean) : [],
-      requireAllRoles: Boolean(requireAllRoles),
-      extraEntries: Array.isArray(extraEntries)
-        ? extraEntries.filter((e) => e && e.roleId && e.entries > 0)
-        : [],
-      stackEntries: Boolean(stackEntries),
-      isDrop: Boolean(isDrop),
-      winnersRoleId: winnersRoleId || null,
-      color: typeof color === "number" ? color : 0x00BD5B,
-      emoji: emoji || "🎉",
-      image: image || null,
-      thumbnail: thumbnail || null,
-      message: message || null,
-      rejectionMessage: rejectionMessage || null,
-    });
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(
+        () => reject(new Error("Discord API timed out after 15 seconds. Discord may be rate-limiting the server IP. Try using $gc in Discord instead.")),
+        15000
+      )
+    );
+
+    const msg = await Promise.race([
+      startGiveaway({
+        guild,
+        channelId,
+        minutes,
+        winners,
+        prize,
+        host: host || "GFX GIVEAWAY",
+        requiredRoleIds: Array.isArray(requiredRoleIds) ? requiredRoleIds.filter(Boolean) : [],
+        blockedRoleIds: Array.isArray(blockedRoleIds) ? blockedRoleIds.filter(Boolean) : [],
+        requireAllRoles: Boolean(requireAllRoles),
+        extraEntries: Array.isArray(extraEntries)
+          ? extraEntries.filter((e) => e && e.roleId && e.entries > 0)
+          : [],
+        stackEntries: Boolean(stackEntries),
+        isDrop: Boolean(isDrop),
+        winnersRoleId: winnersRoleId || null,
+        color: typeof color === "number" ? color : 0x00BD5B,
+        emoji: emoji || "🎉",
+        image: image || null,
+        thumbnail: thumbnail || null,
+        message: message || null,
+        rejectionMessage: rejectionMessage || null,
+      }),
+      timeoutPromise,
+    ]);
     res.json({ success: true, messageId: msg.id, channelId: msg.channel.id });
   } catch (err) {
     console.error("Dashboard giveaway error:", err);
@@ -1641,7 +1669,7 @@ client.on("messageCreate", async (message) => {
 
   // ---------- GIVEAWAY: CREATE ----------
   if (command === "gc") {
-    if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    if (!isGiveawayManager(member, message.guild)) {
       return message.reply("❌ You don't have permission to create a giveaway.");
     }
 
@@ -1650,9 +1678,9 @@ client.on("messageCreate", async (message) => {
     const entryRole = message.mentions.roles.first();
     const prize = args.slice(entryRole ? 3 : 2).join(" ");
 
-    if (!minutes || !winners || !entryRole || !prize) {
+    if (!minutes || !winners || !prize) {
       return message.reply(
-        "Usage: `$gc <minutes> <winners> <@role> <prize>`\nExample: `$gc 10 1 @Premium Member 25K Giveaway Future Account`"
+        "Usage: `$gc <minutes> <winners> [@role (optional)] <prize>`\nExample: `$gc 10 1 25K Giveaway Account` or `$gc 10 1 @Role 25K Account`"
       );
     }
 
@@ -1661,7 +1689,7 @@ client.on("messageCreate", async (message) => {
       channelId: message.channel.id,
       minutes,
       winners,
-      requiredRoleIds: [entryRole.id],
+      requiredRoleIds: entryRole ? [entryRole.id] : [],
       prize,
       host: message.author.toString(),
     });
@@ -1672,7 +1700,7 @@ client.on("messageCreate", async (message) => {
 
   // ---------- GIVEAWAY: RESTORE (adopt an existing message + fresh countdown) ----------
   if (command === "grestore") {
-    if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    if (!isGiveawayManager(member, message.guild)) {
       return message.reply("❌ You don't have permission to restore a giveaway.");
     }
     const messageId = args[0];
@@ -1759,7 +1787,7 @@ client.on("messageCreate", async (message) => {
 
   // ---------- GIVEAWAY: END EARLY ----------
   if (command === "gend") {
-    if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    if (!isGiveawayManager(member, message.guild)) {
       return message.reply("❌ You don't have permission to end a giveaway.");
     }
     const messageId = args[0];
@@ -1772,7 +1800,7 @@ client.on("messageCreate", async (message) => {
 
   // ---------- GIVEAWAY: REROLL ----------
   if (command === "greroll") {
-    if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    if (!isGiveawayManager(member, message.guild)) {
       return message.reply("❌ You don't have permission to reroll a giveaway.");
     }
     const messageId = args[0];
@@ -2130,8 +2158,8 @@ async function handleSlashCommand(interaction) {
     }
 
     case "gc": {
-      if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-        return interaction.reply("❌ You don't have permission to create a giveaway.");
+      if (!isGiveawayManager(member, interaction.guild)) {
+        return interaction.reply({ content: "❌ You don't have permission to create a giveaway.", flags: MessageFlags.Ephemeral });
       }
 
       const minutes = options.getInteger("minutes");
@@ -2144,7 +2172,7 @@ async function handleSlashCommand(interaction) {
         channelId: interaction.channel.id,
         minutes,
         winners,
-        requiredRoleIds: [entryRole.id],
+        requiredRoleIds: entryRole ? [entryRole.id] : [],
         prize,
         host: interaction.user.toString(),
       });
@@ -2153,20 +2181,20 @@ async function handleSlashCommand(interaction) {
     }
 
     case "grestore": {
-      if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-        return interaction.reply("❌ You don't have permission to restore a giveaway.");
+      if (!isGiveawayManager(member, interaction.guild)) {
+        return interaction.reply({ content: "❌ You don't have permission to restore a giveaway.", flags: MessageFlags.Ephemeral });
       }
       const messageId = options.getString("message_id");
       const minutes = options.getInteger("minutes");
 
       const target = await interaction.channel.messages.fetch(messageId).catch(() => null);
       if (!target) {
-        return interaction.reply("❌ Couldn't find that message in this channel. Run the command in the same channel as the giveaway.");
+        return interaction.reply({ content: "❌ Couldn't find that message in this channel. Run the command in the same channel as the giveaway.", flags: MessageFlags.Ephemeral });
       }
 
       const oldEmbed = target.embeds && target.embeds[0];
       if (!oldEmbed) {
-        return interaction.reply("❌ That message has no giveaway embed I can read.");
+        return interaction.reply({ content: "❌ That message has no giveaway embed I can read.", flags: MessageFlags.Ephemeral });
       }
 
       const prize = (oldEmbed.title || "").replace(/^\s*🎉\s*/, "").trim() || "Giveaway";
@@ -2176,7 +2204,7 @@ async function handleSlashCommand(interaction) {
       const hostMatch = (oldEmbed.description || "").match(/Hosted by:\*\*\s*(<@\d+>)/);
 
       if (!requiredRoleIds.length) {
-        return interaction.reply("❌ Couldn't find the required role in that embed.");
+        return interaction.reply({ content: "❌ Couldn't find the required role in that embed.", flags: MessageFlags.Ephemeral });
       }
 
       const endTime = Math.floor((Date.now() + minutes * 60000) / 1000);
@@ -2234,20 +2262,20 @@ async function handleSlashCommand(interaction) {
     }
 
     case "gend": {
-      if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-        return interaction.reply("❌ You don't have permission to end a giveaway.");
+      if (!isGiveawayManager(member, interaction.guild)) {
+        return interaction.reply({ content: "❌ You don't have permission to end a giveaway.", flags: MessageFlags.Ephemeral });
       }
       const messageId = options.getString("message_id");
       if (!messageId || !activeGiveaways.has(messageId)) {
-        return interaction.reply("❌ That's not an active giveaway message ID.");
+        return interaction.reply({ content: "❌ That's not an active giveaway message ID.", flags: MessageFlags.Ephemeral });
       }
       await endGiveaway(messageId);
       return interaction.reply("✅ Giveaway ended.");
     }
 
     case "greroll": {
-      if (!member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-        return interaction.reply("❌ You don't have permission to reroll a giveaway.");
+      if (!isGiveawayManager(member, interaction.guild)) {
+        return interaction.reply({ content: "❌ You don't have permission to reroll a giveaway.", flags: MessageFlags.Ephemeral });
       }
       const messageId = options.getString("message_id");
       const data = endedGiveaways.get(messageId);
@@ -3101,7 +3129,10 @@ async function startGiveaway({
   message = null,
   rejectionMessage = null,
 }) {
-  const channel = await guild.channels.fetch(channelId);
+  const channel = guild.channels.cache.get(channelId) || (await guild.channels.fetch(channelId).catch(() => null));
+  if (!channel) {
+    throw new Error(`Giveaway channel not found (${channelId}). Bot may lack access.`);
+  }
   const endTime = Math.floor((Date.now() + minutes * 60000) / 1000);
 
   const lines = [`Click the button below to enter!\n`];
@@ -3136,11 +3167,18 @@ async function startGiveaway({
   const sendOptions = { embeds: [embed] };
   if (message) sendOptions.content = message;
 
+  let safeEmoji = emoji || "🎉";
+  if (typeof safeEmoji === "string" && safeEmoji.startsWith(":") && safeEmoji.endsWith(":")) {
+    const raw = safeEmoji.replace(/:/g, "");
+    const foundEmoji = guild.emojis?.cache?.find((e) => e.name.toLowerCase() === raw.toLowerCase());
+    safeEmoji = foundEmoji ? foundEmoji.id : "🎉";
+  }
+
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("enter_giveaway")
       .setLabel("Enter Giveaway")
-      .setEmoji(emoji)
+      .setEmoji(safeEmoji)
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId("participants_giveaway")

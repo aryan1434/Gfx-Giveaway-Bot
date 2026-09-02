@@ -388,17 +388,31 @@ async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (token) headers.authorization = `Bearer ${token}`;
   if (options.body) headers["content-type"] = "application/json";
-  const res = await fetch(path, { ...options, headers });
-  if (res.status === 401) {
-    localStorage.removeItem("dashboard_token");
-    localStorage.removeItem("dashboard_user");
-    token = "";
-    showLogin();
-    throw new Error("Session expired. Please sign in with Google.");
+
+  const controller = new AbortController();
+  const timeoutMs = options.timeout || 20000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(path, { ...options, headers, signal: controller.signal });
+    clearTimeout(timer);
+    if (res.status === 401) {
+      localStorage.removeItem("dashboard_token");
+      localStorage.removeItem("dashboard_user");
+      token = "";
+      showLogin();
+      throw new Error("Session expired. Please sign in again.");
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Request failed");
+    return data;
+  } catch (err) {
+    clearTimeout(timer);
+    if (err.name === "AbortError") {
+      throw new Error("Request timed out (Discord/server took too long to respond). Try using $gc in Discord.");
+    }
+    throw err;
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Request failed");
-  return data;
 }
 
 function getInitialAvatar(name) {
