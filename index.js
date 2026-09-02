@@ -240,6 +240,48 @@ app.get("/api/auth/discord/config", (req, res) => {
   });
 });
 
+// Diagnostic auth health check
+app.get("/api/auth/debug", async (req, res) => {
+  const clientId = getDiscordClientId();
+  const clientSecret = String(process.env.DISCORD_CLIENT_SECRET || DISCORD_CLIENT_SECRET || "").trim();
+  const redirectUri = getRedirectUri(req);
+  
+  let discordResponse = null;
+  try {
+    const creds = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    const testRes = await fetch("https://discord.com/api/v10/oauth2/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": `Basic ${creds}`,
+      },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: "authorization_code",
+        code: "test_probe_code",
+        redirect_uri: redirectUri,
+      }).toString(),
+    });
+    discordResponse = await testRes.json();
+  } catch (e) {
+    discordResponse = { error: e.message };
+  }
+
+  const isValid = discordResponse && discordResponse.error === "invalid_grant";
+  return res.json({
+    status: isValid ? "OK" : "CONFIGURATION_ISSUE",
+    clientId,
+    secretConfigured: Boolean(clientSecret),
+    secretLength: clientSecret ? clientSecret.length : 0,
+    secretPreview: clientSecret ? `${clientSecret.slice(0, 4)}...${clientSecret.slice(-4)}` : "(empty)",
+    redirectUri,
+    discordCheck: isValid
+      ? "SUCCESS: Client ID and Client Secret are accepted by Discord!"
+      : `FAILED: Discord rejected credentials with error: ${JSON.stringify(discordResponse)}`,
+  });
+});
+
 // Discord OAuth 2.0 Login Redirect
 app.get("/api/auth/discord/login", (req, res) => {
   const clientId = getDiscordClientId();
@@ -268,7 +310,7 @@ app.get("/api/auth/discord/callback", async (req, res) => {
   }
 
   const clientId = getDiscordClientId();
-  const clientSecret = DISCORD_CLIENT_SECRET;
+  const clientSecret = String(process.env.DISCORD_CLIENT_SECRET || DISCORD_CLIENT_SECRET || "").trim();
 
   if (!clientSecret) {
     return res.redirect("/?error=DISCORD_CLIENT_SECRET_is_not_configured_in_env");
@@ -277,17 +319,21 @@ app.get("/api/auth/discord/callback", async (req, res) => {
   const redirectUri = getRedirectUri(req);
 
   try {
-    // Exchange code for token with Discord API
+    const creds = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    // Exchange code for token with Discord API (supports both Basic auth and body credentials)
     const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": `Basic ${creds}`,
+      },
       body: new URLSearchParams({
         client_id: clientId,
         client_secret: clientSecret,
         grant_type: "authorization_code",
         code: String(code),
         redirect_uri: redirectUri,
-      }),
+      }).toString(),
     });
 
     const tokenData = await tokenRes.json();
