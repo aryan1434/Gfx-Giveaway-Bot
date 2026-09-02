@@ -227,9 +227,13 @@ app.get(["/giveaways", "/giveawayinfo", "/approvals", "/pending", "/wait"], (req
 });
 
 function getRedirectUri(req) {
-  if (DISCORD_CALLBACK_URL) return DISCORD_CALLBACK_URL;
   const host = req.get("host") || `localhost:${DASHBOARD_PORT}`;
-  const protocol = req.protocol || "http";
+  const protoHeader = req.get("x-forwarded-proto");
+  const protocol = protoHeader ? protoHeader.split(",")[0].trim() : (req.protocol || "http");
+
+  if (DISCORD_CALLBACK_URL && DISCORD_CALLBACK_URL.includes(host)) {
+    return DISCORD_CALLBACK_URL;
+  }
   return `${protocol}://${host}/api/auth/discord/callback`;
 }
 
@@ -298,7 +302,9 @@ app.get("/api/auth/discord/callback", async (req, res) => {
     const tokenData = await tokenRes.json();
     if (!tokenRes.ok || !tokenData.access_token) {
       console.error("[AUTH] Discord token exchange failed:", tokenData);
-      const desc = tokenData.error_description || tokenData.error || "Token exchange failed";
+      const desc = tokenData.error_description 
+        ? `${tokenData.error || "OAuth Error"}: ${tokenData.error_description}`
+        : (tokenData.error || "Token exchange failed");
       return res.redirect(`/?error=${encodeURIComponent(desc)}`);
     }
 
