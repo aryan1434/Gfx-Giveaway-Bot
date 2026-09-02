@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: gfx-giveaway-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: TOKEN
+        sync: false
+      - key: WINNER_LOG_CHANNEL_ID
+        value: 1535915013729026150
+      - key: SERVER_TAG
+        value: GFX
+      - key: SERVER_TAG_ROLE_ID
+        value: 1535157101310115921
+      - key: GIVEAWAY_WINNER_ROLE_ID
+        value: 1532972012341956678
+      - key: GUILD_ID
+        value: 1395645163547791370
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+      - key: AUTO_OPEN_BROWSER
+        value: "false"

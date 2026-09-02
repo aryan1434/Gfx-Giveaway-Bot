@@ -1,0 +1,32 @@
+{
+  "name": "gfxgiveaway",
+  "version": "1.0.0",
+  "description": "Animated Discord giveaway bot with web dashboard",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "deploy:commands": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.3",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "gif-encoder-2": "^1.0.5",
+    "sharp": "^0.35.3",
+    "webp-wasm": "^1.0.6"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "giveaway",
+    "dashboard",
+    "animated"
+  ],
+  "author": "GFX Giveaway Team",
+  "license": "MIT"
+}
