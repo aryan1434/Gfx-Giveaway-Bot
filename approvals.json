@@ -1,13 +1,14 @@
 {
   "approved": {
-    "754248398957183007": {
-      "id": "754248398957183007",
-      "name": "Aryan479",
-      "username": "Aryan479",
-      "picture": "",
+    "115707570889254594533": {
+      "id": "115707570889254594533",
+      "name": "Aryan Maurya",
+      "username": "mauryaaryan29",
+      "email": "mauryaaryan29@gmail.com",
+      "picture": "https://lh3.googleusercontent.com/a/ACg8ocIjdqaI6GcNkoQFbmqRgISNiLaOteQQKdE_I2r9JIS7l9Pw9XME=s96-c",
       "role": "admin",
-      "approvedAt": 1788353880000,
-      "approvedBy": "owner"
+      "approvedAt": 1788386453259,
+      "approvedBy": "admin email config"
     }
   },
   "pending": {}

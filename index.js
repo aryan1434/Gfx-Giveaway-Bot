@@ -75,6 +75,13 @@ const ADMIN_DISCORD_IDS = String(
   .map((id) => id.trim())
   .filter(Boolean);
 
+const ADMIN_EMAILS = String(
+  process.env.ADMIN_EMAILS || "mauryaaryan29@gmail.com"
+)
+  .split(",")
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+
 function isGiveawayManager(member, guild) {
   if (!member) return false;
   if (ADMIN_DISCORD_IDS.includes(member.id)) return true;
@@ -129,6 +136,26 @@ function syncUserApproval(user) {
         role: "admin",
         approvedAt: Date.now(),
         approvedBy: "env config",
+      };
+      if (approvals.pending[userId]) delete approvals.pending[userId];
+      saveApprovals(approvals);
+    }
+    return { status: "approved", role: "admin" };
+  }
+
+  // 1b. Explicit Admin Email in .env
+  const userEmail = String(user.email || "").trim().toLowerCase();
+  if (userEmail && ADMIN_EMAILS.includes(userEmail)) {
+    if (!approvals.approved[userId]) {
+      approvals.approved[userId] = {
+        id: userId,
+        name: user.name || "Admin",
+        username: user.username || userEmail.split("@")[0],
+        email: userEmail,
+        picture: user.picture || "",
+        role: "admin",
+        approvedAt: Date.now(),
+        approvedBy: "admin email config",
       };
       if (approvals.pending[userId]) delete approvals.pending[userId];
       saveApprovals(approvals);
@@ -206,8 +233,8 @@ function verifySessionToken(tokenStr) {
     const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
     if (payload.exp && Date.now() > payload.exp) return null;
 
-    // Refresh status and role live from approvals
-    if (payload.id && payload.provider === "discord") {
+    // Refresh status and role live from approvals store
+    if (payload.id) {
       const current = syncUserApproval(payload);
       payload.status = current.status;
       payload.role = current.role;
@@ -216,6 +243,17 @@ function verifySessionToken(tokenStr) {
   } catch (e) {
     return null;
   }
+}
+
+function requireApprovedUser(req, res, next) {
+  const auth = req.headers.authorization || "";
+  const tokenStr = auth.replace(/^Bearer\s+/i, "").trim();
+  const user = verifySessionToken(tokenStr);
+  if (!user || user.status !== "approved") {
+    return res.status(403).json({ error: "Access denied: Account approval by Admin required." });
+  }
+  req.user = user;
+  next();
 }
 
 app.use(express.json());
@@ -241,7 +279,162 @@ function getRedirectUri(req) {
   return `${protocol}://${host}/api/auth/discord/callback`;
 }
 
-// Auth endpoints - Discord Login Only
+function getGoogleRedirectUri(req) {
+  const host = req.get("host") || `localhost:${DASHBOARD_PORT}`;
+  const protoHeader = req.get("x-forwarded-proto");
+  const protocol = protoHeader ? protoHeader.split(",")[0].trim() : (req.protocol || "http");
+  const envUrl = process.env.GOOGLE_CALLBACK_URL;
+
+  if (envUrl && envUrl.includes(host)) {
+    return envUrl;
+  }
+  return `${protocol}://${host}/api/auth/google/callback`;
+}
+
+// Google OAuth 2.0 Config
+app.get("/api/auth/google/config", (req, res) => {
+  const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  const callbackUrl = getGoogleRedirectUri(req);
+  res.json({
+    clientId,
+    configured: Boolean(clientId && process.env.GOOGLE_CLIENT_SECRET),
+    callbackUrl,
+  });
+});
+
+// Google OAuth 2.0 Login Redirect
+app.get("/api/auth/google/login", (req, res) => {
+  const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  if (!clientId) {
+    return res.status(400).send("GOOGLE_CLIENT_ID is not configured in .env");
+  }
+
+  const redirectUri = getGoogleRedirectUri(req);
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "openid email profile");
+  authUrl.searchParams.set("prompt", "select_account");
+  return res.redirect(authUrl.toString());
+});
+
+// Google OAuth 2.0 Callback
+app.get("/api/auth/google/callback", async (req, res) => {
+  const { code, error } = req.query;
+  if (error) {
+    return res.redirect(`/?error=${encodeURIComponent("Google authentication cancelled: " + error)}`);
+  }
+  if (!code) {
+    return res.redirect("/?error=missing_authorization_code");
+  }
+
+  const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  const clientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
+  const redirectUri = getGoogleRedirectUri(req);
+
+  try {
+    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        code: String(code),
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: "authorization_code",
+      }).toString(),
+    });
+
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok || !tokenData.access_token) {
+      console.error("[AUTH] Google token exchange failed:", tokenData);
+      return res.redirect(`/?error=${encodeURIComponent(tokenData.error_description || tokenData.error || "Google token exchange failed")}`);
+    }
+
+    const userRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    });
+    const profile = await userRes.json();
+    if (!userRes.ok || !profile.sub) {
+      return res.redirect("/?error=failed_to_fetch_google_profile");
+    }
+
+    const baseUser = {
+      id: profile.sub,
+      name: profile.name || profile.email,
+      username: (profile.email || "user").split("@")[0],
+      email: profile.email || "",
+      picture: profile.picture || "",
+      provider: "google",
+    };
+
+    const approval = syncUserApproval(baseUser);
+    const user = {
+      ...baseUser,
+      status: approval.status,
+      role: approval.role,
+    };
+
+    const sessionToken = createSessionToken(user);
+    console.log(`[AUTH] Google login: ${user.name} (${user.email}) - Status: ${user.status} (${user.role})`);
+
+    const escapeHtml = (str) =>
+      String(str || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+
+    return res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Authenticating...</title>
+  <style>
+    body { background: #08080c; color: #00FF66; font-family: 'Segoe UI', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .box { text-align: center; }
+    .spinner { width: 38px; height: 38px; border: 3px solid rgba(0, 255, 102, 0.25); border-top-color: #00FF66; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 1.5rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="spinner"></div>
+    <h2 style="margin:0 0 0.5rem; color:#fff;">Signing into GFX Dashboard...</h2>
+    <p style="margin:0; color:#8c8c9e; font-size:14px;">Welcome, ${escapeHtml(user.name)} (${escapeHtml(user.email)})</p>
+  </div>
+  <script>
+    try {
+      localStorage.setItem("dashboard_token", ${JSON.stringify(sessionToken)});
+      localStorage.setItem("dashboard_user", ${JSON.stringify(JSON.stringify(user))});
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage({ type: "AUTH_SUCCESS", token: ${JSON.stringify(sessionToken)}, user: ${JSON.stringify(user)} }, "*");
+        setTimeout(() => window.close(), 300);
+      } else {
+        window.location.replace("/");
+      }
+    } catch (e) {
+      if (window.opener && !window.opener.closed) {
+        try {
+          window.opener.postMessage({ type: "AUTH_SUCCESS", token: ${JSON.stringify(sessionToken)}, user: ${JSON.stringify(user)} }, "*");
+        } catch (_) {}
+        setTimeout(() => window.close(), 300);
+      } else {
+        window.location.replace("/?token=" + encodeURIComponent(${JSON.stringify(sessionToken)}));
+      }
+    }
+  </script>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("[AUTH] Error in Google callback:", err);
+    return res.redirect(`/?error=${encodeURIComponent("Authentication error: " + err.message)}`);
+  }
+});
+
+// Auth endpoints - Discord Login Config
 app.get("/api/auth/discord/config", (req, res) => {
   const clientId = getDiscordClientId();
   const callbackUrl = getRedirectUri(req);
@@ -447,6 +640,34 @@ app.get("/api/auth/discord/callback", async (req, res) => {
     console.error("[AUTH] Error in Discord callback:", err);
     return res.redirect(`/?error=${encodeURIComponent("Authentication error: " + err.message)}`);
   }
+});
+
+// Admin Password Login (uses DASHBOARD_PASSWORD from .env)
+app.post("/api/auth/password", (req, res) => {
+  const { password } = req.body || {};
+  const configuredPassword = process.env.DASHBOARD_PASSWORD ? String(process.env.DASHBOARD_PASSWORD).trim() : "";
+  if (!configuredPassword) {
+    return res.status(400).json({ error: "DASHBOARD_PASSWORD is not set in environment." });
+  }
+  if (!password || String(password).trim() !== configuredPassword) {
+    return res.status(401).json({ error: "Incorrect admin password." });
+  }
+
+  const adminId = ADMIN_DISCORD_IDS[0] || "754248398957183007";
+  const user = {
+    id: adminId,
+    name: "Admin (Password)",
+    username: "admin",
+    email: "admin@gfx.local",
+    picture: "",
+    provider: "password",
+    status: "approved",
+    role: "admin",
+  };
+  syncUserApproval(user);
+  const token = createSessionToken(user);
+  console.log(`[AUTH] Admin logged in with DASHBOARD_PASSWORD.`);
+  return res.json({ success: true, token, user });
 });
 
 // Quick dev sign-in (for local testing before Discord Client Secret is configured)
@@ -717,7 +938,7 @@ app.post("/api/winners/:messageId/send-discord", async (req, res) => {
   }
 });
 
-app.post("/api/winners", async (req, res) => {
+app.post("/api/winners", requireApprovedUser, async (req, res) => {
   const entry = req.body;
   if (!entry || !entry.prize || !entry.winners || !entry.winners.length) {
     return res.status(400).json({ error: "Missing required fields." });
@@ -747,7 +968,7 @@ app.post("/api/winners", async (req, res) => {
   res.json({ success: true });
 });
 
-app.delete("/api/giveaways/:messageId/dashboard-only", async (req, res) => {
+app.delete("/api/giveaways/:messageId/dashboard-only", requireApprovedUser, async (req, res) => {
   const { messageId } = req.params;
   console.log(`Dashboard-only delete requested for: ${messageId}`);
   const data = activeGiveaways.get(messageId) || endedGiveaways.get(messageId);
@@ -761,7 +982,7 @@ app.delete("/api/giveaways/:messageId/dashboard-only", async (req, res) => {
   res.json({ success: true, prize: data.prize });
 });
 
-app.delete("/api/giveaways/:messageId", async (req, res) => {
+app.delete("/api/giveaways/:messageId", requireApprovedUser, async (req, res) => {
   const { messageId } = req.params;
   const data = activeGiveaways.get(messageId) || endedGiveaways.get(messageId);
   if (!data) {
@@ -778,7 +999,7 @@ app.delete("/api/giveaways/:messageId", async (req, res) => {
   res.json({ success: true, prize: data.prize });
 });
 
-app.post("/api/giveaways/:messageId/reroll", async (req, res) => {
+app.post("/api/giveaways/:messageId/reroll", requireApprovedUser, async (req, res) => {
   const { messageId } = req.params;
 
   if (activeGiveaways.has(messageId)) {
@@ -998,7 +1219,7 @@ app.get("/api/guilds/:guildId/voice-activity", async (req, res) => {
   res.json(list);
 });
 
-app.post("/api/giveaway", async (req, res) => {
+app.post("/api/giveaway", requireApprovedUser, async (req, res) => {
   const {
     guildId,
     channelId,

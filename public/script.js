@@ -539,27 +539,14 @@ function showDashboard() {
   if (dashboard) dashboard.classList.remove("hidden");
 }
 
-let discordConfig = null;
+let authConfig = null;
 
-async function loadDiscordConfig() {
-  const setupCard = $("discordSetupCard");
-  const setupClientId = $("setupClientId");
-
+async function loadAuthConfig() {
   try {
-    const res = await fetch("/api/auth/discord/config");
-    discordConfig = await res.json();
+    const res = await fetch("/api/auth/google/config");
+    authConfig = await res.json();
   } catch (e) {
-    console.error("Failed to load Discord auth config:", e);
-  }
-
-  if (discordConfig && discordConfig.clientId && setupClientId) {
-    setupClientId.textContent = discordConfig.clientId;
-  }
-
-  if (!discordConfig || !discordConfig.configured) {
-    if (setupCard) setupCard.classList.remove("hidden");
-  } else {
-    if (setupCard) setupCard.classList.add("hidden");
+    console.error("Failed to load auth config:", e);
   }
 }
 
@@ -574,7 +561,7 @@ function showLogin() {
   if (dashboard) dashboard.classList.add("hidden");
   if (pendingScreen) pendingScreen.classList.add("hidden");
   if (loginScreen) loginScreen.classList.remove("hidden");
-  loadDiscordConfig();
+  loadAuthConfig();
 }
 
 // Dev login button for testing before Discord Client Secret is configured
@@ -601,6 +588,117 @@ if (devLoginBtn) {
       if (errorEl) {
         errorEl.textContent = err.message || "Dev login failed";
         errorEl.classList.remove("hidden");
+      }
+    }
+  });
+}
+
+// Google Login Popup Window Handler
+const googleLoginBtn = $("googleLoginBtn");
+if (googleLoginBtn) {
+  googleLoginBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    const errorEl = $("loginError");
+    if (errorEl) errorEl.classList.add("hidden");
+
+    const width = 520;
+    const height = 620;
+    const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
+    const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
+
+    const popup = window.open(
+      "/api/auth/google/login",
+      "GoogleAuthPopup",
+      `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no,location=no`
+    );
+
+    if (!popup || popup.closed || typeof popup.closed === "undefined") {
+      // If browser blocks popups, fallback to direct redirect
+      window.location.href = "/api/auth/google/login";
+      return;
+    }
+
+    // Fallback timer checking if popup closed and saved token to localStorage
+    const pollInterval = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(pollInterval);
+        const savedToken = localStorage.getItem("dashboard_token");
+        if (savedToken) {
+          token = savedToken;
+          checkAuth();
+        }
+      }
+    }, 500);
+  });
+}
+
+// Listen for message from Google login popup
+window.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "AUTH_SUCCESS") {
+    token = event.data.token;
+    localStorage.setItem("dashboard_token", token);
+    const user = event.data.user;
+    if (user) {
+      currentUser = user;
+      localStorage.setItem("dashboard_user", JSON.stringify(user));
+      updateUserDisplay(user);
+    }
+    if (user && user.status === "pending") {
+      showPending(user);
+    } else {
+      showDashboard();
+      init();
+      toast(`Welcome, ${user?.name || "Admin"}!`);
+    }
+  }
+});
+
+// Password Login form handler
+const passwordLoginForm = $("passwordLoginForm");
+if (passwordLoginForm) {
+  passwordLoginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errorEl = $("loginError");
+    const input = $("adminPasswordInput");
+    const btn = $("passwordLoginBtn");
+    if (errorEl) errorEl.classList.add("hidden");
+
+    const password = input ? input.value.trim() : "";
+    if (!password) return;
+
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Verifying...";
+    }
+
+    try {
+      const res = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Incorrect password");
+
+      token = data.token;
+      localStorage.setItem("dashboard_token", token);
+      if (data.user) {
+        currentUser = data.user;
+        localStorage.setItem("dashboard_user", JSON.stringify(data.user));
+        updateUserDisplay(data.user);
+      }
+      showDashboard();
+      init();
+      toast(`Unlocked as Admin!`);
+    } catch (err) {
+      if (errorEl) {
+        errorEl.textContent = err.message || "Incorrect password";
+        errorEl.classList.remove("hidden");
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Unlock Dashboard ⚡";
       }
     }
   });
