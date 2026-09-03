@@ -268,17 +268,6 @@ app.get(["/giveaways", "/giveawayinfo", "/approvals", "/pending", "/wait"], (req
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-function getRedirectUri(req) {
-  const host = req.get("host") || `localhost:${DASHBOARD_PORT}`;
-  const protoHeader = req.get("x-forwarded-proto");
-  const protocol = protoHeader ? protoHeader.split(",")[0].trim() : (req.protocol || "http");
-
-  if (DISCORD_CALLBACK_URL && DISCORD_CALLBACK_URL.includes(host)) {
-    return DISCORD_CALLBACK_URL;
-  }
-  return `${protocol}://${host}/api/auth/discord/callback`;
-}
-
 function getGoogleRedirectUri(req) {
   const host = req.get("host") || `localhost:${DASHBOARD_PORT}`;
   const protoHeader = req.get("x-forwarded-proto");
@@ -430,214 +419,6 @@ app.get("/api/auth/google/callback", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("[AUTH] Error in Google callback:", err);
-    return res.redirect(`/?error=${encodeURIComponent("Authentication error: " + err.message)}`);
-  }
-});
-
-// Auth endpoints - Discord Login Config
-app.get("/api/auth/discord/config", (req, res) => {
-  const clientId = getDiscordClientId();
-  const callbackUrl = getRedirectUri(req);
-  res.json({
-    clientId,
-    configured: Boolean(DISCORD_CLIENT_SECRET),
-    callbackUrl,
-    hasAllowedUsers: DISCORD_ALLOWED_USERS.length > 0,
-  });
-});
-
-// Diagnostic auth health check
-app.get("/api/auth/debug", async (req, res) => {
-  const clientId = getDiscordClientId();
-  const clientSecret = String(process.env.DISCORD_CLIENT_SECRET || DISCORD_CLIENT_SECRET || "").trim();
-  const redirectUri = getRedirectUri(req);
-  
-  let discordResponse = null;
-  try {
-    const creds = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-    const testRes = await fetch("https://discord.com/api/v10/oauth2/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": `Basic ${creds}`,
-      },
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: "authorization_code",
-        code: "test_probe_code",
-        redirect_uri: redirectUri,
-      }).toString(),
-    });
-    discordResponse = await testRes.json();
-  } catch (e) {
-    discordResponse = { error: e.message };
-  }
-
-  const isValid = discordResponse && discordResponse.error === "invalid_grant";
-  return res.json({
-    status: isValid ? "OK" : "CONFIGURATION_ISSUE",
-    clientId,
-    secretConfigured: Boolean(clientSecret),
-    secretLength: clientSecret ? clientSecret.length : 0,
-    secretPreview: clientSecret ? `${clientSecret.slice(0, 4)}...${clientSecret.slice(-4)}` : "(empty)",
-    redirectUri,
-    discordCheck: isValid
-      ? "SUCCESS: Client ID and Client Secret are accepted by Discord!"
-      : `FAILED: Discord rejected credentials with error: ${JSON.stringify(discordResponse)}`,
-  });
-});
-
-// Discord OAuth 2.0 Login Redirect
-app.get("/api/auth/discord/login", (req, res) => {
-  const clientId = getDiscordClientId();
-  if (!clientId) {
-    return res.status(400).send("Discord Client ID could not be determined. Please set DISCORD_CLIENT_ID in .env");
-  }
-
-  const redirectUri = getRedirectUri(req);
-  const authUrl = new URL("https://discord.com/oauth2/authorize");
-  authUrl.searchParams.set("client_id", clientId);
-  authUrl.searchParams.set("redirect_uri", redirectUri);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", "identify email guilds");
-  authUrl.searchParams.set("prompt", "consent");
-  return res.redirect(authUrl.toString());
-});
-
-// Discord OAuth 2.0 Callback
-app.get("/api/auth/discord/callback", async (req, res) => {
-  const { code, error } = req.query;
-  if (error) {
-    return res.redirect(`/?error=${encodeURIComponent("Discord authentication cancelled: " + error)}`);
-  }
-  if (!code) {
-    return res.redirect("/?error=missing_authorization_code");
-  }
-
-  const clientId = getDiscordClientId();
-  const clientSecret = String(process.env.DISCORD_CLIENT_SECRET || DISCORD_CLIENT_SECRET || "").trim();
-
-  if (!clientSecret) {
-    return res.redirect("/?error=DISCORD_CLIENT_SECRET_is_not_configured_in_env");
-  }
-
-  const redirectUri = getRedirectUri(req);
-
-  try {
-    const creds = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-    // Exchange code for token with Discord API (supports both Basic auth and body credentials)
-    const tokenRes = await fetch("https://discord.com/api/v10/oauth2/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": `Basic ${creds}`,
-      },
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: "authorization_code",
-        code: String(code),
-        redirect_uri: redirectUri,
-      }).toString(),
-    });
-
-    const tokenData = await tokenRes.json();
-    if (!tokenRes.ok || !tokenData.access_token) {
-      console.error("[AUTH] Discord token exchange failed:", tokenData);
-      const desc = tokenData.error_description 
-        ? `${tokenData.error || "OAuth Error"}: ${tokenData.error_description}`
-        : (tokenData.error || "Token exchange failed");
-      return res.redirect(`/?error=${encodeURIComponent(desc)}`);
-    }
-
-    // Fetch user profile from Discord
-    const userRes = await fetch("https://discord.com/api/v10/users/@me", {
-      headers: { Authorization: `Bearer ${tokenData.access_token}` },
-    });
-    const discordUser = await userRes.json();
-
-    if (!userRes.ok || !discordUser.id) {
-      return res.redirect("/?error=failed_to_fetch_discord_user_profile");
-    }
-
-    // Check user whitelist if configured
-    if (DISCORD_ALLOWED_USERS.length > 0 && !DISCORD_ALLOWED_USERS.includes(discordUser.id)) {
-      console.log(`[AUTH] Unauthorized Discord login attempt by ID: ${discordUser.id} (${discordUser.username})`);
-      return res.redirect(`/?error=${encodeURIComponent(`Access denied: User ID ${discordUser.id} is not authorized.`)}`);
-    }
-
-    // Determine avatar URL
-    let avatarUrl = "";
-    if (discordUser.avatar) {
-      const isAnimated = discordUser.avatar.startsWith("a_");
-      avatarUrl = `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.${isAnimated ? "gif" : "png"}?size=128`;
-    } else {
-      const defaultIndex = (BigInt(discordUser.id) >> 22n) % 6n;
-      avatarUrl = `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
-    }
-
-    const baseUser = {
-      id: discordUser.id,
-      name: discordUser.global_name || discordUser.username,
-      username: discordUser.discriminator && discordUser.discriminator !== "0"
-        ? `${discordUser.username}#${discordUser.discriminator}`
-        : discordUser.username,
-      email: discordUser.email || "",
-      picture: avatarUrl,
-      provider: "discord",
-    };
-
-    const approval = syncUserApproval(baseUser);
-    const user = {
-      ...baseUser,
-      status: approval.status,
-      role: approval.role,
-    };
-
-    const sessionToken = createSessionToken(user);
-    console.log(`[AUTH] Discord login: ${user.name} (@${user.username}) [${user.id}] - Status: ${user.status} (${user.role})`);
-
-    const escapeHtml = (str) =>
-      String(str || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-
-    // Return HTML that securely stores token and redirects to dashboard
-    return res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Authenticating...</title>
-  <style>
-    body { background: #08080c; color: #00FF66; font-family: 'Segoe UI', system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .box { text-align: center; }
-    .spinner { width: 38px; height: 38px; border: 3px solid rgba(0, 255, 102, 0.25); border-top-color: #00FF66; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 1.5rem; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <div class="spinner"></div>
-    <h2 style="margin:0 0 0.5rem; color:#fff;">Signing into GFX Dashboard...</h2>
-    <p style="margin:0; color:#8c8c9e; font-size:14px;">Welcome, ${escapeHtml(user.name)} (@${escapeHtml(user.username)})</p>
-  </div>
-  <script>
-    try {
-      localStorage.setItem("dashboard_token", ${JSON.stringify(sessionToken)});
-      localStorage.setItem("dashboard_user", ${JSON.stringify(JSON.stringify(user))});
-      window.location.replace("/");
-    } catch (e) {
-      window.location.replace("/?token=" + encodeURIComponent(${JSON.stringify(sessionToken)}));
-    }
-  </script>
-</body>
-</html>`);
-  } catch (err) {
-    console.error("[AUTH] Error in Discord callback:", err);
     return res.redirect(`/?error=${encodeURIComponent("Authentication error: " + err.message)}`);
   }
 });
@@ -3546,6 +3327,21 @@ process.on("uncaughtException", (err) => {
 
 const rawToken = process.env.TOKEN ? String(process.env.TOKEN).trim().replace(/^["']|["']$/g, "").trim() : "";
 
+client.on(Events.Error, (error) => {
+  lastLoginError = error.message || "Discord Client Error";
+  console.error("[DISCORD ERROR]", error);
+});
+
+client.on(Events.ShardError, (error, shardId) => {
+  lastLoginError = error.message || `Discord Shard ${shardId} Error`;
+  console.error(`[DISCORD SHARD ${shardId} ERROR]`, error);
+});
+
+client.on(Events.ShardDisconnect, (event, shardId) => {
+  lastLoginError = `Discord Shard ${shardId} disconnected: ${event.reason || event.code || "unknown"}`;
+  console.warn(`[DISCORD SHARD ${shardId} DISCONNECT]`, event);
+});
+
 if (!rawToken) {
   lastLoginError = "No Discord bot TOKEN found in environment variables.";
   console.error("\n❌ [BOT ERROR] No Discord bot TOKEN found in .env file or environment variables!");
@@ -3563,8 +3359,16 @@ if (!rawToken) {
 }
 
 // ---------- CMD/CLI Interface ----------
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-console.log("\n🎮 CMD Interface ready. Type 'help' for commands.\n");
+// On cloud servers (Render, Koyeb etc.) there is no interactive TTY — skip CLI setup
+const isTTY = process.stdin.isTTY;
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: isTTY || false,
+});
+if (isTTY) {
+  console.log("\n🎮 CMD Interface ready. Type 'help' for commands.\n");
+}
 
 function cmdLog(msg) {
   console.log(`\n[CMD] ${msg}`);

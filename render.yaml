@@ -23,6 +23,14 @@ services:
         sync: false
       - key: AUTH_SECRET
         generateValue: true
+      - key: GOOGLE_CLIENT_ID
+        value: 365172990460-drv1dv87haj14c7tftam010ikrgt81i5.apps.googleusercontent.com
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CALLBACK_URL
+        value: https://gfx-giveaway-bot.onrender.com/api/auth/google/callback
+      - key: ADMIN_EMAILS
+        value: mauryaaryan29@gmail.com
       - key: NODE_ENV
         value: production
       - key: AUTO_OPEN_BROWSER
